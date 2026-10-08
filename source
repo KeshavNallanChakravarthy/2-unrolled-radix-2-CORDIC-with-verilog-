@@ -1,0 +1,145 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+//
+// Engineer: Keshav
+// 
+// Create Date: 10/08/2026 09:38:58 PM
+// Design Name: Cordic_stage
+// Module Name: cordic_stage
+// Project Name: 
+// Target Devices: Xilinx Artix-7
+// Tool Versions: 
+// Description: bit width = 16, Q2.16 fixed point standard notation [ sign | integer | fraction ]
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module cordic_stage #(
+        parameter int W =18,
+        parameter int ITER = 0
+    )(
+        input logic clk,
+        input logic rst,
+        
+        input logic valid_in,
+        
+        input logic signed [W-1:0] x_in, //x-axis
+        input logic signed [W-1:0] y_in, //y-axis
+        input logic signed [W-1:0] z_in, //angle
+        
+        output logic valid_out,
+        
+        output logic signed [W-1:0] x_out,
+        output logic signed [W-1:0] y_out,
+        output logic signed [W-1:0] z_out  
+    );         
+
+/*
+0x10000 = 2*pi
+0x080000 = pi
+0x04000 = pi/2
+*/
+  
+  function automatic logic signed [W-1:0]
+    atan_const(input int idx);     
+    
+    begin 
+        case (idx)
+            0: atan_const = 18'sd8192;
+            1: atan_const = 18'sd4836;
+            2: atan_const = 18'sd2555;
+            3: atan_const = 18'sd1297;
+            4: atan_const = 18'sd651;
+            5: atan_const = 18'sd326;
+            6: atan_const = 18'sd163;
+            7: atan_const = 18'sd81;
+            
+            default: atan_const = '0;
+        endcase
+    end 
+  endfunction
+  
+    logic signed [W-1:0] x0, y0, z0;
+    logic signed [W-1:0] x1, y1, z1;
+    logic signed [W-1:0] x2, y2, z2;
+    
+    logic signed [W-1:0] atan0;
+    logic signed [W-1:0] atan1;
+    
+    //rotation 1
+    
+    always_comb begin
+    
+        atan0 = atan_const(ITER);
+        
+        if (z_in >= 0) begin
+            
+            x1 = x_in - (y_in >>> ITER);
+            y1 = y_in + (x_in >>> ITER);
+            z1 = z_in - atan0;
+            
+            end
+            
+            else begin
+            
+            x1 = x_in + (y_in >>> ITER);
+            y1 = y_in - (x_in >>> ITER);
+            z1 = z_in + atan0;      
+            
+            end
+   end
+   
+   /* 
+   rotation 2
+   
+   interation 1 + iteration i+1
+   
+   */
+          
+     always_comb begin
+
+        atan1 = atan_const(ITER + 1);
+
+        if (z1 >= 0) begin
+
+            x2 = x1 - (y1 >>> (ITER + 1));
+            y2 = y1 + (x1 >>> (ITER + 1));
+            z2 = z1 - atan1;
+
+        end
+        else begin
+
+            x2 = x1 + (y1 >>> (ITER + 1));
+            y2 = y1 - (x1 >>> (ITER + 1));
+            z2 = z1 + atan1;
+
+        end
+
+    end    
+        
+  // top
+  
+  always_ff @(posedge clk) begin
+  
+  if (rst) begin
+        x_out <= '0;
+        y_out <= '0;
+        z_out <= '0;
+    end
+   
+   else begin 
+        x_out     <= x2;
+        y_out     <= y2;
+        z_out     <= z2;
+        valid_out <= valid_in;
+    end
+   
+   end
+        
+endmodule
