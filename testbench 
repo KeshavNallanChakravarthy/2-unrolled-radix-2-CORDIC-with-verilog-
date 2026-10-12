@@ -1,0 +1,196 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Testbench : tb_Cordic_top
+// DUT       : Cordic_top (4-stage pipeline, 8 iterations, W = 18, Q2.16)
+//
+// Number format
+//   x / y  : Q2.16     -> 1.0 = 65536
+//   angle  : pi = 32768 -> 1 degree = 32768/180 = 182.044 counts
+//
+// 6 test cases (the INPUT VECTOR position is what changes per case):
+//   1) Vector in Quadrant I
+//   2) Vector in Quadrant II
+//   3) Vector in Quadrant III
+//   4) Vector in Quadrant IV
+//   5) Vector on the X axis
+//   6) Vector on the Y axis
+//
+// Expected result = standard 2D rotation:
+//   x' = x*cos(a) - y*sin(a)
+//   y' = x*sin(a) + y*cos(a)
+//
+// Keep |vector| < ~1.2 so the CORDIC gain (1.647) does not overflow Q2.16.
+//////////////////////////////////////////////////////////////////////////////////
+
+module tb_Cordic_top;
+
+    localparam int W = 18;
+
+    // 8 iterations -> residual angle error up to atan(2^-7) ~ 0.45 deg.
+    // For |v| ~ 0.8 that is ~0.006 -> ~410 LSB, plus rounding. 600 LSB is safe.
+    localparam int TOL = 600;
+
+    // ------------------------------------------------------------------
+    // DUT signals
+    // ------------------------------------------------------------------
+    logic                clk;
+    logic                rst;
+    logic                valid_in;
+    logic signed [W-1:0] x_in;
+    logic signed [W-1:0] y_in;
+    logic signed [W-1:0] angle_in;
+    logic                valid_out;
+    logic signed [W-1:0] x_out;
+    logic signed [W-1:0] y_out;
+
+    Cordic_top #(.W(W)) dut (
+        .clk      (clk),
+        .rst      (rst),
+        .valid_in (valid_in),
+        .x_in     (x_in),
+        .y_in     (y_in),
+        .angle_in (angle_in),
+        .valid_out(valid_out),
+        .x_out    (x_out),
+        .y_out    (y_out)
+    );
+
+    // ------------------------------------------------------------------
+    // Clock : 100 MHz
+    // ------------------------------------------------------------------
+    initial clk = 1'b0;
+    always #5 clk = ~clk;
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+    localparam real PI_R = 3.14159265358979323846;
+
+    int pass_cnt = 0;
+    int fail_cnt = 0;
+
+    // real -> Q2.16 (rounded)
+    function automatic int to_q16(input real v);
+        to_q16 = $rtoi(v * 65536.0 + ((v >= 0.0) ? 0.5 : -0.5));
+    endfunction
+
+    // degrees -> angle word (180 deg = 32768)
+    function automatic int deg_to_word(input real deg);
+        real w;
+        w = deg * 32768.0 / 180.0;
+        deg_to_word = $rtoi(w + ((w >= 0.0) ? 0.5 : -0.5));
+    endfunction
+
+    // ------------------------------------------------------------------
+    // One test: apply a single vector + angle, wait for valid_out, check
+    // ------------------------------------------------------------------
+    task automatic run_test(
+        input string name,
+        input real   xr,
+        input real   yr,
+        input real   ang_deg
+    );
+        real a_rad;
+        real xe_r, ye_r;
+        int  xe, ye;
+        int  dx, dy;
+        int  timeout;
+        bit  got;
+
+        // golden model
+        a_rad = ang_deg * PI_R / 180.0;
+        xe_r  = xr * $cos(a_rad) - yr * $sin(a_rad);
+        ye_r  = xr * $sin(a_rad) + yr * $cos(a_rad);
+        xe    = to_q16(xe_r);
+        ye    = to_q16(ye_r);
+
+        // drive one input beat (change inputs on negedge, DUT samples on posedge)
+        @(negedge clk);
+        x_in     = to_q16(xr);
+        y_in     = to_q16(yr);
+        angle_in = deg_to_word(ang_deg);
+        valid_in = 1'b1;
+
+        @(negedge clk);
+        valid_in = 1'b0;
+
+        // wait for valid_out (pipeline latency = 5 clocks)
+        got     = 1'b0;
+        timeout = 0;
+        while (!got && timeout < 20) begin
+            @(posedge clk);
+            #1;
+            if (valid_out === 1'b1) got = 1'b1;
+            timeout++;
+        end
+
+        if (!got) begin
+            $display("[FAIL] %s : valid_out never asserted (timeout)", name);
+            fail_cnt++;
+        end
+        else begin
+            dx = x_out - xe;
+            dy = y_out - ye;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+
+            $display("------------------------------------------------------------");
+            $display("%s", name);
+            $display("  in   : x=%f  y=%f  angle=%f deg (word=%0d)", xr, yr, ang_deg, deg_to_word(ang_deg));
+            $display("  exp  : x=%0d (%f)  y=%0d (%f)", xe, xe_r, ye, ye_r);
+            $display("  got  : x=%0d (%f)  y=%0d (%f)", x_out, x_out/65536.0, y_out, y_out/65536.0);
+            $display("  err  : dx=%0d LSB  dy=%0d LSB  (tol=%0d)", dx, dy, TOL);
+
+            if (dx <= TOL && dy <= TOL) begin
+                $display("  [PASS]");
+                pass_cnt++;
+            end
+            else begin
+                $display("  [FAIL]");
+                fail_cnt++;
+            end
+        end
+
+        // idle gap so the pipeline is empty before the next case
+        repeat (8) @(posedge clk);
+    endtask
+
+    // ------------------------------------------------------------------
+    // Stimulus
+    // ------------------------------------------------------------------
+    initial begin
+        rst      = 1'b1;
+        valid_in = 1'b0;
+        x_in     = '0;
+        y_in     = '0;
+        angle_in = '0;
+
+        // reset, then idle a few cycles so valid bits in the stages flush
+        // (cordic_stage does not reset valid_out, so it can be X at start)
+        repeat (4)  @(posedge clk);
+        @(negedge clk);
+        rst = 1'b0;
+        repeat (8)  @(posedge clk);
+
+        //          name                      x        y       angle(deg)
+        run_test("Case 1: Quadrant I",        0.5,     0.5,     30.0);
+        run_test("Case 2: Quadrant II",      -0.5,     0.5,    120.0);   // exercises angle > 90 pre-rotation
+        run_test("Case 3: Quadrant III",     -0.5,    -0.5,    -45.0);
+        run_test("Case 4: Quadrant IV",       0.5,    -0.5,   -150.0);   // exercises angle < -90 pre-rotation
+        run_test("Case 5: On X axis",         0.75,    0.0,     60.0);
+        run_test("Case 6: On Y axis",         0.0,     0.75,   -90.0);
+
+        $display("============================================================");
+        $display("SUMMARY : %0d PASSED, %0d FAILED", pass_cnt, fail_cnt);
+        $display("============================================================");
+        $finish;
+    end
+
+    // global watchdog
+    initial begin
+        #100000;
+        $display("[ERROR] Global timeout");
+        $finish;
+    end
+
+endmodule
